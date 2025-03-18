@@ -29,6 +29,8 @@ class FCNN(nn.Module):
 
         self.n_channels = n_channels
         self.n_convolutional_layers = n_convolutional_layers
+        self.batch_norm_layers = []
+        self.dropout_layers = []
 
         # ---------------------------------------------------------------------
         # Define the model's layers
@@ -80,15 +82,17 @@ class FCNN(nn.Module):
     # -------------------------------------------------------------------------
 
     def forward(self, x):
+        x = self.input_layer(x)
 
-        x = self.input_layer.forward(x)
-
-        for conv_layer in self.convolutional_layers:
-            x = conv_layer.forward(x)
+        # Iterate through convolutional layers
+        batch_norm_index = 0
+        dropout_index = 0
+        for i, conv_layer in enumerate(self.convolutional_layers):
+            x = conv_layer(x)
             x = torch.relu(x)
 
-        x = self.output_layer.forward(x)
-        x = torch.sigmoid(x)
+        x = self.output_layer(x)
+        x = torch.sigmoid(x)  # Binary classification
 
         return x
 

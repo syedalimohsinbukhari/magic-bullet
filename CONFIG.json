@@ -1,10 +1,9 @@
 {
   "data":
   {
-    "training": "/path/to/training.hdf",
-    "validation": "/path/to/validation.hdf",
-    "testing": "/path/to/testing.hdf",
-    "real_events": "/path/to/real_events.hdf"
+    "training": "/home/sarl-ws-5/PycharmProjects/ggwd/output/training.hdf",
+    "validation": "/home/sarl-ws-5/PycharmProjects/ggwd/output/validation.hdf",
+    "testing": "/home/sarl-ws-5/PycharmProjects/ggwd/output/testing.hdf"
   },
   "static_args":
   {
