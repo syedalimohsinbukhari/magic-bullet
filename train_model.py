@@ -7,20 +7,18 @@ Train the fully convolutional neural network model with PyTorch.
 # -----------------------------------------------------------------------------
 
 import argparse
-import numpy as np
 import time
-import torch
-
-from tensorboardX import SummaryWriter
 from typing import Any
+
+import numpy as np
+import torch
+from tensorboardX import SummaryWriter
 
 from utils.checkpointing import CheckpointManager
 from utils.datasets import InjectionDataset
 from utils.models import FCNN
 from utils.training import AverageMeter, get_log_dir, update_lr
 
-import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # -----------------------------------------------------------------------------
 # FUNCTION DEFINITIONS
@@ -85,6 +83,7 @@ def get_arguments() -> argparse.Namespace:
     arguments = parser.parse_args()
     return arguments
 
+
 def train(dataloader: torch.utils.data.DataLoader,
           model: torch.nn.Module,
           loss_func: Any,
@@ -99,64 +98,81 @@ def train(dataloader: torch.utils.data.DataLoader,
         model: Instance of the model that is being trained.
         loss_func: A loss function to compute the error between the
             actual and the desired output of the model.
-        optimizer: An optimizer that is used to compute
+        optimizer: An instance of an optimizer that is used to compute
             and perform the updates to the weights of the network.
         epoch: The current training epoch.
-        args: Namespace object containing global variables.
+        args: Namespace object containing some global variable (e.g.,
+            command line arguments, such as the batch size)
     """
+
+    # -------------------------------------------------------------------------
+    # Preliminaries
+    # -------------------------------------------------------------------------
 
     # Activate training mode
     model.train()
 
-    # Track time, loss, and accuracy
+    # Keep track the time to process a batch, as well as the batch losses
     batch_times = AverageMeter()
     batch_losses = AverageMeter()
-    batch_accuracies = AverageMeter()  # ✅ Add accuracy tracking
+
+    # -------------------------------------------------------------------------
+    # Process the training dataset in mini-batches
+    # -------------------------------------------------------------------------
 
     for batch_idx, (data, target) in enumerate(dataloader):
+
+        # Initialize start time of the batch
         batch_start = time.time()
 
-        # Move data to GPU if available
+        # Fetch data and move to device
         data, target = data.to(args.device), target.to(args.device)
         target = target.squeeze()
 
-        # Zero out gradients
+        # Clear gradients
         optimizer.zero_grad()
 
-        # Forward pass
+        # Compute forward pass through model
         output = model.forward(data).squeeze()
 
-        # Compute loss
+        # Calculate the loss for the batch
         loss = loss_func(output, target)
 
-        # Backward pass and optimizer step
+        # Back-propagate the loss and update the weights
         loss.backward()
-        optimizer.step()
+        optimizer.step(closure=None)
 
-        torch.cuda.empty_cache()
+        # ---------------------------------------------------------------------
+        # Log information about current batch to TensorBoard
+        # ---------------------------------------------------------------------
 
-        # Convert outputs to binary predictions (threshold at 0.5)
-        predicted = (output > 0.5).float()
-        
-        # Compute accuracy: Compare predicted vs. target
-        correct = (predicted == target).float().mean().item()
+        if args.tensorboard:
+            # Compute how many examples we have processed already and log the
+            # loss value for the current batch
+            global_step = ((epoch - 1) * args.n_train_batches + batch_idx) * \
+                          args.batch_size
+            args.logger.add_scalar(tag='loss/train',
+                                   scalar_value=loss.item(),
+                                   global_step=global_step)
 
-        # Update meters
+        # ---------------------------------------------------------------------
+        # Additional logging to console
+        # ---------------------------------------------------------------------
+
+        # Store the loss and processing time for the current batch
         batch_losses.update(loss.item())
-        batch_accuracies.update(correct)  # ✅ Store accuracy
         batch_times.update(time.time() - batch_start)
 
-        # Log loss & accuracy to TensorBoard
-        if args.tensorboard:
-            global_step = ((epoch - 1) * args.n_train_batches + batch_idx) * args.batch_size
-            args.logger.add_scalar('loss/train', loss.item(), global_step)
-            args.logger.add_scalar('accuracy/train', correct, global_step)  # ✅ Log accuracy
+        # Which fraction of batches have we already processed this epoch?
+        percent = 100. * batch_idx / args.n_train_batches
 
-        # Console logging
-        if batch_idx % args.log_interval == 0:
-            percent = 100. * batch_idx / args.n_train_batches
-            print(f'Epoch: {epoch:>3}/{args.epochs} | Batch: {batch_idx:>3}/{args.n_train_batches}'
-                  f' ({percent:>4.1f}%) | Loss: {loss.item():.6f} | Acc: {correct:.4f} | Time: {batch_times.value:.3f}s')
+        # Print some information about how the training is going
+        print(f'Epoch: {epoch:>3}/{args.epochs}', end=' | ', flush=True)
+        print(f'Batch: {batch_idx + 1:>3}/{args.n_train_batches}',
+              flush=True, end=' ')
+        print(f'({percent:>4.1f}%)', end=' | ', flush=True)
+        print(f'Loss: {loss.item():.6f}', end=' | ', flush=True)
+        print(f'Time: {batch_times.value:>6.3f}s', flush=True)
 
 
 def validate(dataloader: torch.utils.data.DataLoader,
@@ -165,63 +181,85 @@ def validate(dataloader: torch.utils.data.DataLoader,
              epoch: int,
              args: argparse.Namespace) -> float:
     """
-    Run the model on the validation dataset and compute loss & accuracy.
+    At the end of each epoch, run the model on the validation dataset.
 
     Args:
         dataloader: The dataloader containing the validation data.
         model: Instance of the model that is being trained.
-        loss_func: Loss function to compute the error.
+        loss_func: A loss function to compute the error between the
+            actual and the desired output of the model.
         epoch: The current training epoch.
-        args: Namespace object containing global variables.
+        args: Namespace object containing some global variable (e.g.,
+            command line arguments, such as the batch size).
 
     Returns:
-        The average validation loss.
+        The average loss on the validation dataset.
     """
 
-    # Activate evaluation mode
+    # -------------------------------------------------------------------------
+    # Preliminaries
+    # -------------------------------------------------------------------------
+
+    # Activate model evaluation mode
     model.eval()
 
+    # Initialize validation loss as 0, because we need to sum it up over all
+    # mini batches for the validation dataset
     validation_loss = 0
-    validation_correct = 0  # ✅ Track accuracy
-    total_samples = 0
 
-    # Ensure loss function sums over batch
+    # Ensure the loss function uses 'sum' as the reduction method (we don't
+    # want batch averages, but just one global validation average)
     reduction = loss_func.reduction
     loss_func.reduction = 'sum'
 
+    # -------------------------------------------------------------------------
+    # Process the validation dataset in mini-batches
+    # -------------------------------------------------------------------------
+
+    # At test time, we do not need to compute gradients
     with torch.no_grad():
+
+        # Loop in mini batches over the validation dataset
         for data, target in dataloader:
+            # Fetch batch data and move to device
             data, target = data.to(args.device), target.to(args.device)
             target = target.squeeze()
 
-            # Forward pass
+            # Compute the forward pass through the model
             output = model.forward(data).squeeze()
 
-            # Compute loss
+            # Compute the loss for the batch
             validation_loss += loss_func(output, target).item()
 
-            # Convert to binary predictions
-            predicted = (output > 0.5).float()
+    # -------------------------------------------------------------------------
+    # Compute the average validation loss
+    # -------------------------------------------------------------------------
 
-            # Compute accuracy
-            validation_correct += (predicted == target).float().sum().item()
-            total_samples += target.numel()
+    validation_loss /= np.prod(dataloader.dataset.labels.shape)
+    print(f'\nAverage loss on validation set:\t {validation_loss:.5f}\n')
 
-    # Compute average loss and accuracy
-    validation_loss /= total_samples
-    validation_accuracy = validation_correct / total_samples  # ✅ Compute accuracy
+    # -------------------------------------------------------------------------
+    # Log stuff to TensorBoard
+    # -------------------------------------------------------------------------
 
-    print(f'\nValidation Loss: {validation_loss:.5f} | Validation Accuracy: {validation_accuracy:.4f}\n')
-
-    # Log accuracy to TensorBoard
     if args.tensorboard:
+        # Compute the current global_step (i.e., the total number examples
+        # that we've seen during training so far)
         global_step = epoch * args.n_train_batches * args.batch_size
-        args.logger.add_scalar('loss/validation', validation_loss, global_step)
-        args.logger.add_scalar('accuracy/validation', validation_accuracy, global_step)  # ✅ Log accuracy
 
-    # Restore original reduction method
+        # Log the validation loss
+        args.logger.add_scalar(tag='loss/validation',
+                               scalar_value=validation_loss,
+                               global_step=global_step)
+
+    # -------------------------------------------------------------------------
+    # Postliminaries
+    # -------------------------------------------------------------------------
+
+    # Finally, restore the original reduction method of the loss function
     loss_func.reduction = reduction
 
+    # Return the validation loss
     return validation_loss
 
 
@@ -295,13 +333,13 @@ if __name__ == '__main__':
     # go down for at least 10 training epochs
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                            factor=0.5,
-                                                           patience=5,
+                                                           patience=8,
                                                            min_lr=1e-6)
 
     # -------------------------------------------------------------------------
     # Instantiate a CheckpointManager and load checkpoint (if desired)
     # -------------------------------------------------------------------------
-    
+
     # Instantiate a new CheckpointManager
     checkpoint_manager = CheckpointManager(model=model,
                                            optimizer=optimizer,
@@ -311,7 +349,7 @@ if __name__ == '__main__':
 
     # Check if we are resuming training, and if so, load the checkpoint
     if args.resume is not None:
-        
+
         # Load the checkpoint from the provided checkpoint file
         checkpoint_manager.load_checkpoint(args.resume)
         args.start_epoch = checkpoint_manager.last_epoch + 1

@@ -74,7 +74,7 @@ def postprocess_prediction(prediction: np.ndarray,
     output = np.convolve(prediction, kernel, mode='same')
 
     # Round the raw outputs based on the provided threshold
-    output = (output >= threshold).astype(np.float)
+    output = (output >= threshold).astype(float)
 
     return output
 
